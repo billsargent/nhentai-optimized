@@ -15,6 +15,8 @@ from nhentai.logger import logger
 from nhentai.constant import BASE_URL
 from nhentai.utils import generate_html, generate_doc, generate_main_html, generate_metadata, \
     paging, check_cookie, signal_handler, DB, move_to_folder
+from nhentai.cache import cache
+from nhentai.file_utils import verify_file_integrity
 
 
 def main():
@@ -25,6 +27,11 @@ def main():
         sys.exit(1)
 
     options = cmd_parser()
+    
+    # Handle cache options first
+    if handle_cache_options(options):
+        sys.exit(0)
+        
     logger.info(f'Using mirror: {BASE_URL}')
 
     # CONFIG['proxy'] will be changed after cmd_parser()
@@ -159,3 +166,25 @@ signal.signal(signal.SIGINT, signal_handler)
 
 if __name__ == '__main__':
     main()
+
+# Handle cache clearing if requested
+def handle_cache_options(args):
+    """Handle cache-related command options."""
+    from nhentai.cache import cache
+    
+    if hasattr(args, 'clean_cache') and args.clean_cache:
+        logger.info('Clearing cache...')
+        # Create cache directory if it doesn't exist
+        import os
+        cache_dir = os.path.join(os.path.expanduser('~'), '.nhentai', 'cache')
+        os.makedirs(cache_dir, exist_ok=True)
+        # Clear cache
+        cache.clear()
+        logger.info('Cache cleared successfully.')
+        return True
+        
+    if hasattr(args, 'cache_timeout') and args.cache_timeout != 86400:  # If not default
+        cache.max_age = args.cache_timeout
+        logger.info(f'Cache timeout set to {args.cache_timeout} seconds.')
+    
+    return False

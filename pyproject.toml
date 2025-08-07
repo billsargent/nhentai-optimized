@@ -9,7 +9,7 @@ include = ["nhentai/viewer/**"]
 
 
 [tool.poetry.dependencies]
-python = "^3.8"
+python = "^3.9"
 requests = "^2.32.3"
 soupsieve = "^2.6"
 beautifulsoup4 = "^4.12.3"
@@ -20,6 +20,9 @@ httpx = "^0.28.1"
 
 
 chardet = "^5.2.0"
+curl-cffi = "^0.13.0"
+img2pdf = "^0.6.1"
+pypdf2 = "^3.0.1"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"

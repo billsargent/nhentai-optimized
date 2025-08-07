@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from nhentai import constant
 from nhentai.logger import logger
 from nhentai.utils import Singleton, async_request
+from nhentai.cache import cache
 
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -60,7 +61,9 @@ class Downloader(Singleton):
         async with self.semaphore:
             return await self.download(*args, **kwargs)
 
-    async def download(self, url, folder='', filename='', retried=0, proxy=None, length=0):
+    async def download(self, url, folder='', filename='', proxy=None, length=0):
+        from nhentai.rate_limit import with_retry
+        
         logger.info(f'Starting to download {url} ...')
 
         if self.delay:
@@ -75,40 +78,42 @@ class Downloader(Singleton):
             filename = base_filename + extension
 
         try:
-            response = await async_request('GET', url, timeout=self.timeout, proxy=proxy)
+            # Use the retry mechanism instead of manual retry
+            async def fetch_url(url, proxy):
+                response = await async_request('GET', url, timeout=self.timeout, proxy=proxy)
+                if response.status_code != 200:
+                    # Try mirrors
+                    path = urlparse(url).path
+                    for mirror in constant.IMAGE_URL_MIRRORS:
+                        logger.info(f"Try mirror: {mirror}{path}")
+                        mirror_url = f'{mirror}{path}'
+                        mirror_response = await async_request('GET', mirror_url, timeout=self.timeout, proxy=proxy)
+                        if mirror_response.status_code == 200:
+                            return mirror_response
+                return response
+
+            # Apply retry mechanism with exponential backoff
+            response = await with_retry(
+                fetch_url,
+                url,
+                proxy,
+                max_retries=constant.RETRY_TIMES,
+                backoff_factor=1.5
+            )
 
             if response.status_code != 200:
-                path = urlparse(url).path
-                for mirror in constant.IMAGE_URL_MIRRORS:
-                    logger.info(f"Try mirror: {mirror}{path}")
-                    mirror_url = f'{mirror}{path}'
-                    response = await async_request('GET', mirror_url, timeout=self.timeout, proxies=proxy)
-                    if response.status_code == 200:
-                        break
-
-            if not await self.save(filename, response):
-                logger.error(f'Can not download image {url}')
+                logger.error(f'Failed to download {url}: HTTP {response.status_code}')
                 return -1, url
 
-        except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError) as e:
-            if retried < constant.RETRY_TIMES:
-                logger.warning(f'Download {filename} failed, retrying({retried + 1}) times...')
-                return await self.download(
-                    url=url,
-                    folder=folder,
-                    filename=filename,
-                    retried=retried + 1,
-                    proxy=proxy,
-                )
-            else:
-                logger.warning(f'Download {filename} failed with {constant.RETRY_TIMES} times retried, skipped')
-                return -2, url
+            if not await self.save(filename, response):
+                logger.error(f'Cannot download image {url}')
+                return -1, url
 
         except Exception as e:
             import traceback
 
             logger.error(f"Exception type: {type(e)}")
-            traceback.print_stack()
+            traceback.print_exc()  # More informative than print_stack()
             logger.critical(str(e))
             return -9, url
 
@@ -121,16 +126,32 @@ class Downloader(Singleton):
         if response is None:
             logger.error('Error: Response is None')
             return False
+            
+        from nhentai.file_utils import atomic_write, safe_filename
+        
+        # Ensure filename is safe
+        safe_name = safe_filename(filename)
+        if safe_name != filename:
+            logger.info(f"Sanitized filename: '{filename}' to '{safe_name}'")
+            filename = safe_name
+            
         save_file_path = os.path.join(self.folder, filename)
-        with open(save_file_path, 'wb') as f:
-            if response is not None:
-                length = response.headers.get('content-length')
-                if length is None:
-                    f.write(response.content)
-                else:
-                    async for chunk in response.aiter_bytes(2048):
-                        f.write(chunk)
-        return True
+        
+        try:
+            with atomic_write(save_file_path, 'wb') as f:
+                if response is not None:
+                    length = response.headers.get('content-length')
+                    if length is None:
+                        content = await response.read()
+                        f.write(content)
+                    else:
+                        # Use a more efficient chunk size
+                        async for chunk in response.aiter_bytes(8192):
+                            f.write(chunk)
+            return True
+        except Exception as e:
+            logger.error(f"Error saving file {filename}: {e}")
+            return False
 
     def create_storage_object(self, folder:str):
         if not os.path.exists(folder):
@@ -170,26 +191,57 @@ class Downloader(Singleton):
         return True
 
 class CompressedDownloader(Downloader):
+    def __init__(self, path='', threads=5, timeout=30, delay=0, exit_on_fail=False,
+                 no_filename_padding=False):
+        super().__init__(path, threads, timeout, delay, exit_on_fail, no_filename_padding)
+        self.zipfile = None
+        self._filename = None
+        
     def create_storage_object(self, folder):
-        filename = f'{folder}.zip'
-        print(filename)
-        self.zipfile = zipfile.ZipFile(filename,'w')
-        self.close = lambda: self.zipfile.close()
+        self._filename = f'{folder}.zip'
+        logger.info(f'Creating compressed file: {self._filename}')
+        self.zipfile = zipfile.ZipFile(self._filename, 'w', compression=zipfile.ZIP_DEFLATED)
+        
+    def close(self):
+        """Properly close the zipfile to ensure all data is written"""
+        if self.zipfile:
+            try:
+                self.zipfile.close()
+                logger.info(f'Successfully created and closed {self._filename}')
+            except Exception as e:
+                logger.error(f'Error closing zipfile: {e}')
+            finally:
+                self.zipfile = None
+    
+    def __del__(self):
+        """Ensure zipfile is closed even if an exception occurs"""
+        self.close()
 
     async def save(self, filename, response) -> bool:
         if response is None:
             logger.error('Error: Response is None')
             return False
+            
+        if self.zipfile is None:
+            logger.error('Error: Zipfile is not initialized')
+            return False
 
-        image_data = io.BytesIO()
-        length = response.headers.get('content-length')
-        if length is None:
-            content = await response.read()
-            image_data.write(content)
-        else:
-            async for chunk in response.aiter_bytes(2048):
-                image_data.write(chunk)
+        try:
+            # Use a with statement for BytesIO to ensure proper cleanup
+            with io.BytesIO() as image_data:
+                length = response.headers.get('content-length')
+                if length is None:
+                    content = await response.read()
+                    image_data.write(content)
+                else:
+                    # Use an optimal chunk size for better performance
+                    chunk_size = 8192  # 8KB chunks instead of 2KB
+                    async for chunk in response.aiter_bytes(chunk_size):
+                        image_data.write(chunk)
 
-        image_data.seek(0)
-        self.zipfile.writestr(filename, image_data.read())
-        return True
+                image_data.seek(0)
+                self.zipfile.writestr(filename, image_data.read())
+            return True
+        except Exception as e:
+            logger.error(f'Error saving file {filename} to zip: {e}')
+            return False

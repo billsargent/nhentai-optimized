@@ -11,6 +11,7 @@ import requests
 import sqlite3
 import urllib.parse
 from typing import Tuple
+from curl_cffi import requests as cffi_requests
 
 from nhentai import constant
 from nhentai.constant import PATH_SEPARATOR
@@ -36,7 +37,7 @@ def get_headers():
     return headers
 
 def request(method, url, **kwargs):
-    session = requests.Session()
+    session = cffi_requests.Session(impersonate="chrome110")
     session.headers.update(get_headers())
 
     if not kwargs.get('proxies', None):
@@ -48,19 +49,35 @@ def request(method, url, **kwargs):
     return getattr(session, method)(url, verify=False, **kwargs)
 
 
-async def async_request(method, url, proxy = None, **kwargs):
-    headers=get_headers()
+async def async_request(method, url, proxy=None, timeout=30, **kwargs):
+    headers = get_headers()
 
     if proxy is None:
         proxy = constant.CONFIG['proxy']
 
     if isinstance(proxy, (str, )) and not proxy:
         proxy = None
+    
+    proxies = None
+    if proxy:
+        proxies = {
+            'https': proxy,
+            'http': proxy,
+        }
 
-    async with httpx.AsyncClient(headers=headers, verify=False, proxy=proxy, **kwargs) as client:
-        response = await client.request(method, url, **kwargs)
-
-    return response
+    # Use curl_cffi's AsyncSession with Chrome browser emulation for consistency
+    try:
+        async with cffi_requests.AsyncSession(impersonate="chrome110") as session:
+            session.headers.update(headers)
+            method = method.lower()  # curl_cffi expects lowercase method names
+            response = await getattr(session, method)(url, verify=False, proxies=proxies, timeout=timeout, **kwargs)
+        return response
+    except Exception as e:
+        logger.error(f"Error in async_request: {e}")
+        # Fallback to httpx if curl_cffi fails
+        async with httpx.AsyncClient(headers=headers, verify=False, proxy=proxy, timeout=timeout) as client:
+            response = await client.request(method, url, **kwargs)
+        return response
 
 
 def check_cookie():
@@ -276,22 +293,54 @@ def generate_doc(file_type='', output_dir='.', doujinshi_obj=None, regenerate=Fa
     elif file_type == 'pdf':
         try:
             import img2pdf
+            from PyPDF2 import PdfWriter
 
-            """Write images to a PDF file using img2pdf."""
+            """Write images to a PDF file using img2pdf, processing in chunks to save memory."""
             file_list = [f for f in os.listdir(doujinshi_dir) if f.lower().endswith(EXTENSIONS)]
             file_list.sort()
-
-            logger.info(f'Writing PDF file to path: {filename}')
-            with open(filename, 'wb') as pdf_f:
-                full_path_list = (
-                    [os.path.join(doujinshi_dir, image) for image in file_list]
-                )
-                pdf_f.write(img2pdf.convert(full_path_list, rotation=img2pdf.Rotation.ifvalid))
+            
+            # Process in chunks of 5 images to reduce memory usage
+            chunk_size = 5
+            chunks = [file_list[i:i+chunk_size] for i in range(0, len(file_list), chunk_size)]
+            
+            logger.info(f'Writing PDF file to path: {filename} (processing in {len(chunks)} chunks)')
+            
+            # For a single chunk or very small files, use the direct approach
+            if len(chunks) == 1 or len(file_list) <= 3:
+                with open(filename, 'wb') as pdf_f:
+                    full_path_list = [os.path.join(doujinshi_dir, image) for image in file_list]
+                    pdf_f.write(img2pdf.convert(full_path_list, rotation=img2pdf.Rotation.ifvalid))
+            else:
+                # For larger files, use chunking with PyPDF2 to merge
+                pdf_writer = PdfWriter()
+                
+                for i, chunk in enumerate(chunks):
+                    logger.info(f'Processing chunk {i+1}/{len(chunks)} ({len(chunk)} images)')
+                    full_paths = [os.path.join(doujinshi_dir, image) for image in chunk]
+                    
+                    # Convert chunk to PDF in memory
+                    pdf_bytes = img2pdf.convert(full_paths, rotation=img2pdf.Rotation.ifvalid)
+                    
+                    # Create temporary file for the chunk
+                    chunk_file = f"{filename}.chunk_{i}.pdf"
+                    with open(chunk_file, 'wb') as f:
+                        f.write(pdf_bytes)
+                    
+                    # Add to merger
+                    with open(chunk_file, 'rb') as f:
+                        pdf_writer.append(f)
+                    
+                    # Remove temporary file
+                    os.remove(chunk_file)
+                
+                # Write merged PDF
+                with open(filename, 'wb') as f:
+                    pdf_writer.write(f)
 
             logger.log(16, f'PDF file has been written to "{filename}"')
 
-        except ImportError:
-            logger.error("Please install img2pdf package by using pip.")
+        except ImportError as e:
+            logger.error(f"Missing required package: {e}. Please install img2pdf and PyPDF2 packages using pip.")
     else:
         raise ValueError('invalid file type')
 

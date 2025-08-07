@@ -9,6 +9,7 @@ from tabulate import tabulate
 import nhentai.constant as constant
 from nhentai.utils import request
 from nhentai.logger import logger
+from nhentai.cache import cache, cached
 
 
 def _get_csrf_token(content):
@@ -117,6 +118,7 @@ def favorites_parser(page=None):
     return result
 
 
+@cached(max_age=86400)  # Cache for 24 hours
 def doujinshi_parser(id_, counter=0):
     if not isinstance(id_, (int,)) and (isinstance(id_, (str,)) and not id_.isdigit()):
         raise Exception(f'Doujinshi id({id_}) is not valid')
@@ -126,6 +128,13 @@ def doujinshi_parser(id_, counter=0):
     doujinshi = dict()
     doujinshi['id'] = id_
     url = f'{constant.DETAIL_URL}/{id_}/'
+
+    # Check cache first
+    cache_key = f"doujinshi:{id_}"
+    cached_result = cache.get(cache_key)
+    if cached_result:
+        logger.info(f'Using cached data for doujinshi id {id_}')
+        return cached_result
 
     try:
         response = request('get', url)

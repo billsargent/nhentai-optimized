@@ -160,6 +160,11 @@ def cmd_parser():
                         help='set viewer template')
     parser.add_argument('--legacy', dest='legacy', action='store_true', default=False,
                         help='use legacy searching method')
+    # Cache options
+    parser.add_argument('--clean-cache', dest='clean_cache', action='store_true',
+                        help='clean cached API responses and search results')
+    parser.add_argument('--cache-timeout', dest='cache_timeout', type=int, default=86400,
+                        help='cache timeout in seconds (default 24 hours)')
 
     args = parser.parse_args()
 
