@@ -1,6 +1,6 @@
 # nhentai Optimizations Summary
 
-This document summarizes the optimizations made to the nhentai project.
+This document summarizes the optimizations made to the nhentai project by billsargent.
 
 ## 1. HTTP Request Improvements
 
