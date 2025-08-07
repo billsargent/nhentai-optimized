@@ -1,4 +1,4 @@
-nhentai
+nhentai (Optimized)
 =======
 
 あなたも変態。 いいね?
@@ -10,6 +10,8 @@ nhentai
 
 
 nhentai is a CLI tool for downloading doujinshi from `nhentai.net <https://nhentai.net>`_
+
+This fork contains optimizations for performance, memory usage, and improved Cloudflare bypass capabilities.
 
 GUI version: `https://github.com/edgar1016/nhentai-GUI <https://github.com/edgar1016/nhentai-GUI>`_
 
